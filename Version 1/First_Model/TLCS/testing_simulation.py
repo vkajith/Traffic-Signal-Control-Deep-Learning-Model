@@ -1,3 +1,11 @@
+import os, sys
+if 'SUMO_HOME' in os.environ:
+    tools = os.path.join(os.environ['SUMO_HOME'], 'tools')
+    sys.path.append(tools)
+else:
+    sys.exit("please declare environment variable 'SUMO_HOME'")
+
+
 import traci
 import numpy as np
 import random
@@ -29,7 +37,10 @@ class Simulation:
         self._num_actions = num_actions
         self._reward_episode = []
         self._queue_length_episode = []
-        self.counter=[0,0,0,0]
+        self._counter=np.zeros(num_actions)
+        self._sum_waiting_times = []
+        self._sum_waiting_times_c = []
+        
 
 
     def run(self, episode):
@@ -57,7 +68,7 @@ class Simulation:
             # calculate reward of previous action: (change in cumulative waiting time between actions)
             # waiting time = seconds waited by a car since the spawn in the environment, cumulated for every car in incoming lanes
             current_total_wait = self._collect_waiting_times()
-            reward = old_total_wait - current_total_wait
+            reward = -self._get_queue_length()
 
             # choose the light phase to activate, based on the current state of the intersection
             action = self._choose_action(current_state)
@@ -82,6 +93,36 @@ class Simulation:
         simulation_time = round(timeit.default_timer() - start_time, 1)
 
         return simulation_time
+    
+    def run_c(self, episode):
+        
+        self._TrafficGen.generate_routefile(seed=episode)
+        traci.start(self._sumo_cmd)
+        print("Simulating...")
+        
+        #inits
+        self._step = 0
+        self._waiting_times = {}
+        action = 0
+        while self._step < self._max_steps:
+            
+            self._set_green_phase(action)
+            self._simulate_c(self._green_duration)
+            self._set_green_phase(action)
+            self._simulate_c(self._green_duration)
+            self._set_green_phase(action)
+            self._simulate_c(self._green_duration)
+            
+            self._set_yellow_phase(action)
+            self._simulate_c(self._yellow_duration)
+            
+            if(action == self._num_actions - 1):
+                action = 0
+            else:
+                action = action + 1
+            
+            
+            
 
 
     def _simulate(self, steps_todo):
@@ -95,33 +136,52 @@ class Simulation:
             traci.simulationStep()  # simulate 1 step in sumo
             self._step += 1 # update the step counter
             steps_todo -= 1
-            queue_length = self._get_queue_length() 
-            self._queue_length_episode.append(queue_length)
+            wait_time = self._collect_waiting_times()
+            self._sum_waiting_times.append(wait_time)
+            
+    def _simulate_c(self, steps_todo):
+        """
+        Proceed with the simulation in sumo
+        """
+        if (self._step + steps_todo) >= self._max_steps:  # do not do more steps than the maximum allowed number of steps
+            steps_todo = self._max_steps - self._step
+
+        while steps_todo > 0:
+            traci.simulationStep()  # simulate 1 step in sumo
+            self._step += 1 # update the step counter
+            steps_todo -= 1
+            wait_time = self._collect_waiting_times()
+            self._sum_waiting_times_c.append(wait_time)
 
 
     def _collect_waiting_times(self):
         """
         Retrieve the waiting time of every car in the incoming roads
         """
-        incoming_roads = ["E2TL", "N2TL", "W2TL", "S2TL"]
         car_list = traci.vehicle.getIDList()
         for car_id in car_list:
             wait_time = traci.vehicle.getAccumulatedWaitingTime(car_id)
-            road_id = traci.vehicle.getRoadID(car_id)  # get the road id where the car is located
-            if road_id in incoming_roads:  # consider only the waiting times of cars in incoming roads
-                self._waiting_times[car_id] = wait_time
-            else:
-                if car_id in self._waiting_times: # a car that was tracked has cleared the intersection
-                    del self._waiting_times[car_id] 
+            self._waiting_times[car_id] = wait_time
         total_waiting_time = sum(self._waiting_times.values())
         return total_waiting_time
 
 
     def _choose_action(self, state):
         """
-        Pick the best action known based on the current state of the env
+        Pick the best action known based on the current state of the env. Added Counter Variable.
         """
-        return np.argmax(self._Model.predict_one(state))
+       
+        actions = np.argsort(self._Model.predict_one(state))
+        actions_flatten = [j for sub in actions for j in sub]
+        actions_flatten = np.flip(actions_flatten)
+        for i in range(0,self._num_actions):
+            if(self._counter[actions_flatten[i]] > 10):
+                self._counter[actions_flatten[i]] = 0
+                for j in range(num_actions) and j!=i:
+                    self._counter[actions_flatten[j]]+=1
+                return actions_flatten[i]
+        self._counter[actions_flatten[0]] = 0    
+        return actions_flatten[0]
 
 
     def _set_yellow_phase(self, old_action):
@@ -136,20 +196,15 @@ class Simulation:
         """
         Activate the correct green light combination in sumo
         """
-        "Added counter"
        
-        if action_number == 0  and counter[action_number]<3:
+        if action_number == 0:
             traci.trafficlight.setPhase("TL", PHASE_NS_GREEN)
-            counter[action_number]=counter[action_number]+1
-        elif action_number == 1 and counter[action_number]<3:
+        elif action_number == 1:
             traci.trafficlight.setPhase("TL", PHASE_NSL_GREEN)
-            counter[action_number]=counter[action_number]+1
-        elif action_number == 2 and counter[action_number]<3:
+        elif action_number == 2:
             traci.trafficlight.setPhase("TL", PHASE_EW_GREEN)
-            counter[action_number]=counter[action_number]+1
-        elif action_number == 3 and counter[action_number]<3:
+        elif action_number == 3:
             traci.trafficlight.setPhase("TL", PHASE_EWL_GREEN)
-            counter[action_number]=counter[action_number]+1
 
 
     def _get_queue_length(self):
@@ -169,67 +224,22 @@ class Simulation:
         Retrieve the state of the intersection from sumo, in the form of cell occupancy
         """
         state = np.zeros(self._num_states)
-        car_list = traci.vehicle.getIDList()
-
-        for car_id in car_list:
-            lane_pos = traci.vehicle.getLanePosition(car_id)
-            lane_id = traci.vehicle.getLaneID(car_id)
-            lane_pos = 750 - lane_pos  # inversion of lane pos, so if the car is close to the traffic light -> lane_pos = 0 --- 750 = max len of a road
-
-            # distance in meters from the traffic light -> mapping into cells
-            if lane_pos < 7:
-                lane_cell = 0
-            elif lane_pos < 14:
-                lane_cell = 1
-            elif lane_pos < 21:
-                lane_cell = 2
-            elif lane_pos < 28:
-                lane_cell = 3
-            elif lane_pos < 40:
-                lane_cell = 4
-            elif lane_pos < 60:
-                lane_cell = 5
-            elif lane_pos < 100:
-                lane_cell = 6
-            elif lane_pos < 160:
-                lane_cell = 7
-            elif lane_pos < 400:
-                lane_cell = 8
-            elif lane_pos <= 750:
-                lane_cell = 9
-
-            # finding the lane where the car is located 
-            # x2TL_3 are the "turn left only" lanes
-            if lane_id == "W2TL_0" or lane_id == "W2TL_1" or lane_id == "W2TL_2":
-                lane_group = 0
-            elif lane_id == "W2TL_3":
-                lane_group = 1
-            elif lane_id == "N2TL_0" or lane_id == "N2TL_1" or lane_id == "N2TL_2":
-                lane_group = 2
-            elif lane_id == "N2TL_3":
-                lane_group = 3
-            elif lane_id == "E2TL_0" or lane_id == "E2TL_1" or lane_id == "E2TL_2":
-                lane_group = 4
-            elif lane_id == "E2TL_3":
-                lane_group = 5
-            elif lane_id == "S2TL_0" or lane_id == "S2TL_1" or lane_id == "S2TL_2":
-                lane_group = 6
-            elif lane_id == "S2TL_3":
-                lane_group = 7
-            else:
-                lane_group = -1
-
-            if lane_group >= 1 and lane_group <= 7:
-                car_position = int(str(lane_group) + str(lane_cell))  # composition of the two postion ID to create a number in interval 0-79
-                valid_car = True
-            elif lane_group == 0:
-                car_position = lane_cell
-                valid_car = True
-            else:
-                valid_car = False  # flag for not detecting cars crossing the intersection or driving away from it
-
-            if valid_car:
-                state[car_position] = 1  # write the position of the car car_id in the state array in the form of "cell occupied"
+        state[0] = traci.lane.getLastStepVehicleNumber('W2TL_0') + \
+                        traci.lane.getLastStepVehicleNumber('W2TL_1') + \
+                        traci.lane.getLastStepVehicleNumber('W2TL_2')
+        state[1] = traci.lane.getLastStepVehicleNumber('W2TL_3')
+        state[2] = traci.lane.getLastStepVehicleNumber('N2TL_0') + \
+                        traci.lane.getLastStepVehicleNumber('N2TL_1') + \
+                        traci.lane.getLastStepVehicleNumber('N2TL_2')
+        state[3] = traci.lane.getLastStepVehicleNumber('N2TL_3')
+        state[4] = traci.lane.getLastStepVehicleNumber('E2TL_0') + \
+                        traci.lane.getLastStepVehicleNumber('E2TL_1') + \
+                        traci.lane.getLastStepVehicleNumber('E2TL_2')
+        state[5] = traci.lane.getLastStepVehicleNumber('E2TL_3')
+        state[6] = traci.lane.getLastStepVehicleNumber('S2TL_0') + \
+                        traci.lane.getLastStepVehicleNumber('S2TL_1') + \
+                        traci.lane.getLastStepVehicleNumber('S2TL_2') 
+        state[7] = traci.lane.getLastStepVehicleNumber('S2TL_3') 
 
         return state
 
@@ -242,6 +252,13 @@ class Simulation:
     @property
     def reward_episode(self):
         return self._reward_episode
+    
+    @property
+    def sum_waiting_times(self):
+        return self._sum_waiting_times
 
+    @property
+    def sum_waiting_times_c(self):
+        return self._sum_waiting_times_c
 
 
