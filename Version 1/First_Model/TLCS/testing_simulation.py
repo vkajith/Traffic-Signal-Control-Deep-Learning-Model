@@ -120,6 +120,7 @@ class Simulation:
                 action = 0
             else:
                 action = action + 1
+        traci.close()    
             
             
             
@@ -177,8 +178,9 @@ class Simulation:
         for i in range(0,self._num_actions):
             if(self._counter[actions_flatten[i]] > 10):
                 self._counter[actions_flatten[i]] = 0
-                for j in range(num_actions) and j!=i:
-                    self._counter[actions_flatten[j]]+=1
+                for j in range(num_actions):
+                    if j!=i:
+                        self._counter[actions_flatten[j]]+=1
                 return actions_flatten[i]
         self._counter[actions_flatten[0]] = 0    
         return actions_flatten[0]
