@@ -10,6 +10,6 @@ _________
 
 Simulation using SUMO
 
-Model curently trained for 100 epochs
+Model currently trained for 100 epochs
 
 Counter variable added for avoiding staravation scenarios
