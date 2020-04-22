@@ -7,3 +7,9 @@ _________
 4 action space
 8 state representation
 _________
+
+Simulation using SUMO
+
+Model curently trained for 100 epochs
+
+Counter variable added for avoiding staravation scenarios
